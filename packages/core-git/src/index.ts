@@ -1,0 +1,5 @@
+export { cloneVault, type CloneVaultOptions } from './clone.js'
+export { status, type StatusOptions } from './status.js'
+export { autoCommit, type AutoCommitOptions, type CommitResult } from './commit.js'
+export { sync, type SyncOptions } from './sync.js'
+export type { Author, AuthCallback } from './internal.js'

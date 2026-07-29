@@ -1,0 +1,28 @@
+{
+  "name": "md-notebook",
+  "displayName": "MD Notebook",
+  "version": "0.1.0",
+  "description": "Git-backed markdown notes: GitHub repos as vaults, wikilinks, backlinks, and search.",
+  "author": "mxiaomen",
+  "tags": ["notes", "markdown", "git"],
+  "permissions": {
+    "api": ["/apps/md-notebook/api"],
+    "storage": true,
+    "network": true
+  },
+  "ui": {
+    "entry": "index.mjs",
+    "pages": [
+      {
+        "route": "/md-notebook",
+        "label": "MD Notebook",
+        "iconUrl": "icon.svg"
+      }
+    ]
+  },
+  "backend": {
+    "entryPoint": "backend/run.sh",
+    "port": "auto",
+    "healthCheck": "/health"
+  }
+}
