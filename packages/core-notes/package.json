@@ -1,0 +1,16 @@
+{
+  "name": "@md-notebook/core-notes",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@md-notebook/types": "*",
+    "minisearch": "^7.1.0",
+    "yaml": "^2.5.0"
+  }
+}
