@@ -8,6 +8,8 @@ const PORT = 19137
 const BASE = `http://127.0.0.1:${PORT}`
 let proc
 let fixtureUrl
+let localCheckout
+let plainDir
 
 function git(cwd, ...args) {
   execFileSync('git', args, { cwd, stdio: 'pipe' })
@@ -39,6 +41,12 @@ beforeAll(async () => {
   git(work, 'remote', 'add', 'origin', join(base, 'origin.git'))
   git(work, 'push', 'origin', 'trunk')
   fixtureUrl = 'file://' + join(base, 'origin.git')
+
+  // A checkout the "user" already has on disk — the attach target.
+  git(base, 'clone', '--branch', 'trunk', join(base, 'origin.git'), 'my-notes')
+  localCheckout = join(base, 'my-notes')
+  plainDir = join(base, 'plain')
+  mkdirSync(plainDir)
 
   // Server with isolated state home.
   proc = spawn(process.execPath, [join(import.meta.dirname, '..', 'server.mjs')], {
@@ -112,5 +120,72 @@ describe('md-notebook backend', () => {
   it('rejects path traversal', async () => {
     const { status } = await api('GET', '/api/note?path=..%2F..%2Fetc%2Fpasswd')
     expect(status).toBe(500)
+  })
+
+  // ---- attaching an existing local checkout (no second clone) ----
+
+  let attached
+  it('attaches an existing local checkout in place and lists its notes', async () => {
+    const { status, body } = await api('POST', '/api/vaults/attach', { path: localCheckout, name: 'Mine' })
+    expect(status).toBe(200)
+    expect(body.vault.localPath).toBe(localCheckout)
+    expect(body.vault.branch).toBe('trunk')
+    attached = body.vault.id
+
+    const list = await api('GET', `/api/notes?vault=${attached}`)
+    expect(list.body.notes.map((n) => n.path).sort()).toEqual(['Home.md', 'sub/Ideas.md'])
+  })
+
+  it('refuses a non-git folder and a folder already attached', async () => {
+    const plain = await api('POST', '/api/vaults/attach', { path: plainDir })
+    expect(plain.status).toBe(400)
+    expect(plain.body.code).toBe('ENOGIT')
+
+    const dupe = await api('POST', '/api/vaults/attach', { path: localCheckout })
+    expect(dupe.status).toBe(409)
+  })
+
+  it('blocks a save that would clobber an external edit, and allows it once refreshed', async () => {
+    const read = await api('GET', `/api/note?path=Home.md&vault=${attached}`)
+    expect(typeof read.body.mtime).toBe('number')
+
+    // Someone edits the file outside the app (Obsidian, git pull, editor).
+    await new Promise((r) => setTimeout(r, 20))
+    writeFileSync(join(localCheckout, 'Home.md'), '# Home\nEDITED OUTSIDE THE APP\n')
+
+    const stale = await api('PUT', `/api/note?vault=${attached}`, {
+      path: 'Home.md', content: '# Home\napp version\n', baseMtime: read.body.mtime,
+    })
+    expect(stale.status).toBe(409)
+    expect(stale.body.code).toBe('ESTALE')
+    expect(stale.body.disk).toContain('EDITED OUTSIDE THE APP')
+
+    // The external edit survived — nothing was overwritten.
+    const after = await api('GET', `/api/note?path=Home.md&vault=${attached}`)
+    expect(after.body.content).toContain('EDITED OUTSIDE THE APP')
+
+    // Saving against the fresh mtime succeeds and returns the new token.
+    const ok = await api('PUT', `/api/note?vault=${attached}`, {
+      path: 'Home.md', content: '# Home\nresolved in app\n', baseMtime: after.body.mtime,
+    })
+    expect(ok.status).toBe(200)
+    expect(typeof ok.body.mtime).toBe('number')
+  })
+
+  it('reports externally changed notes through the changes poll', async () => {
+    const first = await api('GET', `/api/changes?vault=${attached}&since=0`)
+    if (!first.body.watching) return // recursive watch unsupported here
+    const startRev = first.body.rev
+
+    writeFileSync(join(localCheckout, 'sub', 'Ideas.md'), 'changed by another program\n')
+
+    let seen = null
+    for (let i = 0; i < 40 && !seen; i++) {
+      await new Promise((r) => setTimeout(r, 100))
+      const poll = await api('GET', `/api/changes?vault=${attached}&since=${startRev}`)
+      if (poll.body.rev !== startRev) seen = poll.body
+    }
+    expect(seen).not.toBeNull()
+    expect(seen.changed).toContain('sub/Ideas.md')
   })
 })

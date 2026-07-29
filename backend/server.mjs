@@ -11,10 +11,10 @@
  *   <home>/vaults/<id>/         local clones
  */
 import { createServer } from 'node:http'
-import { promises as fsp, statSync } from 'node:fs'
+import { promises as fsp, statSync, watch as fsWatch } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve, sep } from 'node:path'
-import { cloneVault, status, sync } from '@md-notebook/core-git'
+import { cloneVault, attachVault, AttachError, status, sync } from '@md-notebook/core-git'
 import { SearchIndex, buildBacklinks, noteTitle, parseNote } from '@md-notebook/core-notes'
 
 const HOME = process.env.MD_NOTEBOOK_HOME
@@ -25,6 +25,66 @@ const PORT = Number(process.env.PORT ?? 9137)
 
 /** vaultId -> { index: SearchIndex, backlinks: Map, statuses: Map } */
 const caches = new Map()
+
+// ---------- external-change watcher ----------
+//
+// An attached vault points at a folder the user also edits with their own
+// tooling (Obsidian, editors, git CLI), so the backend must notice changes it
+// did not make. Each watched vault keeps a monotonic revision the UI polls via
+// GET /api/changes; a bump means "re-read the listing, and the open note if it
+// is in `paths`".
+//
+/** vaultId -> { watcher, rev, paths:Set, stale:boolean, timer } */
+const watches = new Map()
+/** absPath -> ms timestamp of our own last write, to ignore self-inflicted events. */
+const selfWrites = new Map()
+const SELF_WRITE_GRACE_MS = 1500
+
+function markSelfWrite(abs) {
+  selfWrites.set(abs, Date.now())
+  // Bound the map: drop entries that can no longer suppress anything.
+  if (selfWrites.size > 200) {
+    const cutoff = Date.now() - SELF_WRITE_GRACE_MS
+    for (const [k, t] of selfWrites) if (t < cutoff) selfWrites.delete(k)
+  }
+}
+
+function watchState(vault) {
+  let w = watches.get(vault.id)
+  if (w) return w
+  w = { watcher: null, rev: 0, paths: new Set(), stale: false, timer: null }
+  watches.set(vault.id, w)
+  const root = contentRoot(vault)
+  try {
+    // Recursive watch is supported on macOS (FSEvents) and Windows; on Linux
+    // it needs Node >= 20. A failure here is non-fatal — the app simply falls
+    // back to refresh-on-interaction, so attach still works.
+    w.watcher = fsWatch(root, { recursive: true, persistent: false }, (_event, filename) => {
+      if (!filename) return
+      const rel = String(filename).split(sep).join('/')
+      if (!rel.endsWith('.md') || rel.startsWith('.git/')) return
+      const abs = join(root, rel)
+      const self = selfWrites.get(abs)
+      if (self && Date.now() - self < SELF_WRITE_GRACE_MS) return
+      w.paths.add(rel)
+      w.stale = true
+      // Coalesce bursts (editors write via temp-file rename, git touches many
+      // files at once) into a single revision bump.
+      if (w.timer) clearTimeout(w.timer)
+      w.timer = setTimeout(() => { w.rev += 1; w.timer = null }, 150)
+    })
+    w.watcher.on('error', () => { /* watch lost; polling still returns rev */ })
+  } catch (err) {
+    console.warn(`md-notebook: cannot watch ${root}: ${err.message}`)
+  }
+  return w
+}
+
+/** Rebuild the search index + backlinks if the tree changed underneath us. */
+async function freshenCache(vault) {
+  const w = watches.get(vault.id)
+  if (w?.stale) { w.stale = false; await rebuildCache(vault) }
+}
 
 // ---------- persistence ----------
 
@@ -138,6 +198,9 @@ async function noteListing(vault) {
       path: p,
       title: noteTitle(p, content),
       modifiedAt: st.mtimeMs,
+      // Creation time. birthtimeMs is real on APFS/HFS+; filesystems without
+      // it report 0, so fall back to ctime (inode change) then mtime.
+      createdAt: st.birthtimeMs || st.ctimeMs || st.mtimeMs,
       syncStatus: cache.statuses.get(prefix + p) ?? 'synced',
     }
   }))
@@ -171,10 +234,59 @@ async function requireVault(url) {
 // ---------- routes ----------
 
 const routes = {
-  'GET /health': async (req, res) => send(res, 200, { ok: true }),
+  /**
+   * Health + capability probe. `features` lets the UI detect a backend process
+   * running older code than the UI bundle (the gateway keeps an app's backend
+   * alive across UI reloads, so a stale process would otherwise surface as
+   * confusing "no route" errors).
+   */
+  'GET /health': async (req, res) => send(res, 200, {
+    ok: true,
+    features: ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat'],
+  }),
+
+  // Same probe under /api so the UI can reach it through the gateway's
+  // /apps/<name>/api/* proxy (the bare /health path is the gateway's own check).
+  'GET /api/health': async (req, res) => send(res, 200, {
+    ok: true,
+    features: ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat'],
+  }),
 
   'GET /api/vaults': async (req, res) => {
-    send(res, 200, { vaults: await readVaults(), hasPat: Boolean(await readPat()), hasGhAuth: Boolean(await ghToken()) })
+    const CLONE_ROOT = join(HOME, 'vaults')
+    const vaults = (await readVaults()).map((v) => ({
+      ...v,
+      // `external` = attached in place (the user's own checkout) rather than
+      // cloned into the app's storage. Computed, never persisted.
+      external: !v.localPath.startsWith(CLONE_ROOT),
+    }))
+    send(res, 200, { vaults, hasPat: Boolean(await readPat()), hasGhAuth: Boolean(await ghToken()) })
+  },
+
+  /**
+   * Forget a vault: { vault } (or ?vault=). Removes the descriptor only —
+   * FILES ARE NEVER DELETED, so an attached folder and even an app-made clone
+   * stay on disk and can be re-added.
+   */
+  'DELETE /api/vaults': async (req, res, url) => {
+    const id = url.searchParams.get('vault')
+    if (!id) return send(res, 400, { error: 'vault is required' })
+    const vaults = await readVaults()
+    const vault = vaults.find((v) => v.id === id)
+    if (!vault) return send(res, 404, { error: 'no such vault' })
+    await writeVaults(vaults.filter((v) => v.id !== id))
+    caches.delete(id)
+    const w = watches.get(id)
+    if (w) { try { w.watcher?.close() } catch { /* already gone */ } watches.delete(id) }
+    send(res, 200, { ok: true, localPath: vault.localPath })
+  },
+
+  /** Set or clear the stored PAT: { pat } — empty/absent clears it. */
+  'PUT /api/pat': async (req, res) => {
+    const { pat } = await readBody(req)
+    if (pat) await writePat(String(pat))
+    else await fsp.rm(PAT_FILE, { force: true })
+    send(res, 200, { hasPat: Boolean(await readPat()), hasGhAuth: Boolean(await ghToken()) })
   },
 
   /** Connect a vault: { url, name?, branch?, subfolder?, pat? } */
@@ -200,8 +312,55 @@ const routes = {
     send(res, 200, { vault })
   },
 
+  /**
+   * Attach an EXISTING local git checkout as a vault — no second clone.
+   * Body: { path, subfolder?, name? }
+   */
+  'POST /api/vaults/attach': async (req, res) => {
+    const body = await readBody(req)
+    if (!body.path) return send(res, 400, { error: 'path is required' })
+    const vaults = await readVaults()
+    const dir = resolve(String(body.path).replace(/^~(?=$|\/)/, homedir()))
+    if (vaults.some((v) => v.localPath === dir)) {
+      return send(res, 409, { error: 'that folder is already attached as a vault' })
+    }
+    let vault
+    try {
+      vault = await attachVault({
+        dir,
+        id: `v${Date.now().toString(36)}`,
+        subfolder: body.subfolder || undefined,
+        name: body.name || undefined,
+      })
+    } catch (err) {
+      if (err instanceof AttachError) return send(res, 400, { error: err.message, code: err.code })
+      throw err
+    }
+    vaults.push(vault)
+    await writeVaults(vaults)
+    await rebuildCache(vault)
+    watchState(vault)
+    send(res, 200, { vault })
+  },
+
+  /**
+   * External-change poll. Returns the vault's current revision plus the note
+   * paths touched since the caller's `since` revision, so the UI can refresh
+   * its listing and warn about an open note edited outside the app.
+   */
+  'GET /api/changes': async (req, res, url) => {
+    const vault = await requireVault(url)
+    const w = watchState(vault)
+    const since = Number(url.searchParams.get('since') ?? 0)
+    const changed = since === w.rev ? [] : [...w.paths]
+    if (since !== w.rev) w.paths.clear()
+    send(res, 200, { rev: w.rev, changed, watching: Boolean(w.watcher) })
+  },
+
   'GET /api/notes': async (req, res, url) => {
     const vault = await requireVault(url)
+    watchState(vault)
+    await freshenCache(vault)
     send(res, 200, { notes: await noteListing(vault) })
   },
 
@@ -211,10 +370,14 @@ const routes = {
     if (!path) return send(res, 400, { error: 'path is required' })
     const abs = safeJoin(contentRoot(vault), path)
     const content = await fsp.readFile(abs, 'utf8')
+    const st = await fsp.stat(abs)
     const cache = await getCache(vault)
     send(res, 200, {
       path,
       content,
+      // Snapshot token for the save guard: PUT rejects if the file changed on
+      // disk since this read (i.e. someone edited it outside the app).
+      mtime: st.mtimeMs,
       meta: parseNote(path, content),
       backlinks: cache.backlinks.get(path) ?? [],
     })
@@ -224,11 +387,27 @@ const routes = {
   'PUT /api/note': async (req, res, url) => {
     const vault = await requireVault(url)
     if (vault.readOnly) return send(res, 403, { error: 'vault is read-only' })
-    const { path, content } = await readBody(req)
+    const { path, content, baseMtime } = await readBody(req)
     if (!path || typeof content !== 'string') return send(res, 400, { error: 'path and content required' })
     const abs = safeJoin(contentRoot(vault), path)
+    // Save guard (optimistic concurrency): when the caller passes the mtime it
+    // read, refuse to write if the file changed underneath — otherwise an edit
+    // made outside the app (Obsidian, git pull) would be silently clobbered.
+    if (typeof baseMtime === 'number') {
+      let current = null
+      try { current = (await fsp.stat(abs)).mtimeMs } catch { /* new file: nothing to clobber */ }
+      if (current !== null && Math.abs(current - baseMtime) > 1) {
+        return send(res, 409, {
+          error: 'this note changed on disk since you opened it',
+          code: 'ESTALE',
+          mtime: current,
+          disk: await fsp.readFile(abs, 'utf8'),
+        })
+      }
+    }
     await fsp.mkdir(dirname(abs), { recursive: true })
     await fsp.writeFile(abs, content)
+    markSelfWrite(abs)
     const cache = await getCache(vault)
     cache.index.update({ path, title: noteTitle(path, content), content })
     const root = contentRoot(vault)
@@ -236,7 +415,7 @@ const routes = {
     const notes = new Map()
     for (const p of paths) notes.set(p, await fsp.readFile(join(root, p), 'utf8'))
     cache.backlinks = buildBacklinks(notes)
-    send(res, 200, { ok: true })
+    send(res, 200, { ok: true, mtime: (await fsp.stat(abs)).mtimeMs })
   },
 
   'DELETE /api/note': async (req, res, url) => {
@@ -260,6 +439,7 @@ const routes = {
   'GET /api/search': async (req, res, url) => {
     const vault = await requireVault(url)
     const q = url.searchParams.get('q') ?? ''
+    await freshenCache(vault)
     const cache = await getCache(vault)
     send(res, 200, { results: q ? cache.index.search(q) : [] })
   },

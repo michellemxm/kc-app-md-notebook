@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { cloneVault, status, autoCommit, sync } from './index.js'
+import { cloneVault, status, autoCommit, sync, attachVault, AttachError } from './index.js'
 
 const BRANCH = 'trunk' // non-protected branch for fixture pushes
 
@@ -156,5 +156,45 @@ describe('sync', () => {
 
     // Working tree must still hold the LOCAL content — never overwritten.
     expect(fs.readFileSync(path.join(dir, 'note.md'), 'utf8')).toBe('LOCAL EDIT\n')
+  })
+})
+
+describe('attachVault', () => {
+  it('adopts an existing working tree without copying it, reading its remote + branch', async () => {
+    // A checkout the "user" already has, made with system git (not our clone).
+    const existing = path.join(root, 'my-notes')
+    gitIn(root, 'clone', '--branch', BRANCH, bare, existing)
+
+    const vault = await attachVault({ dir: existing })
+
+    expect(vault.localPath).toBe(existing)
+    expect(vault.branch).toBe(BRANCH)
+    expect(vault.repo).toMatch(/\/remote$/) // repoSlug strips the .git suffix
+    expect(vault.readOnly).toBe(false)
+    // No second copy: the vault points at the caller's directory verbatim.
+    expect(fs.existsSync(path.join(existing, 'note.md'))).toBe(true)
+  })
+
+  it('scopes to a subfolder when it exists and rejects one that does not', async () => {
+    const existing = path.join(root, 'scoped')
+    gitIn(root, 'clone', '--branch', BRANCH, bare, existing)
+
+    const vault = await attachVault({ dir: existing, subfolder: 'nested' })
+    expect(vault.subfolder).toBe('nested')
+
+    await expect(attachVault({ dir: existing, subfolder: 'missing' })).rejects.toThrow(AttachError)
+  })
+
+  it('refuses a plain directory, a missing path, and a repo with no remote', async () => {
+    const plain = path.join(root, 'plain')
+    fs.mkdirSync(plain)
+    await expect(attachVault({ dir: plain })).rejects.toMatchObject({ code: 'ENOGIT' })
+
+    await expect(attachVault({ dir: path.join(root, 'nope') })).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const noRemote = path.join(root, 'no-remote')
+    fs.mkdirSync(noRemote)
+    gitIn(noRemote, 'init', '-b', BRANCH)
+    await expect(attachVault({ dir: noRemote })).rejects.toMatchObject({ code: 'ENOREMOTE' })
   })
 })

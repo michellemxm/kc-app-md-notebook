@@ -25,6 +25,8 @@ export interface Note {
   title: string
   /** Unix ms of last local modification. */
   modifiedAt: number
+  /** Unix ms of file creation (birthtime, with ctime/mtime fallback). */
+  createdAt: number
   syncStatus: SyncStatus
 }
 

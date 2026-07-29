@@ -1,6 +1,6 @@
 {
   "name": "md-notebook",
-  "displayName": "MD Notebook",
+  "displayName": "Notes",
   "version": "0.1.0",
   "description": "Git-backed markdown notes: GitHub repos as vaults, wikilinks, backlinks, and search.",
   "author": "mxiaomen",
@@ -15,7 +15,7 @@
     "pages": [
       {
         "route": "/md-notebook",
-        "label": "MD Notebook",
+        "label": "Notes",
         "iconUrl": "icon.svg"
       }
     ]
