@@ -9,8 +9,14 @@
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 const API = '/apps/md-notebook/api'
-const ACCENT = '#7c3aed'
-const ACCENT_BG = '#e8d5f5'
+// Theme integration: the app renders inside the KiroCrew dashboard DOM, so
+// these CSS custom properties resolve against the active theme and update
+// live when the user changes theme or font settings.
+const ACCENT = 'var(--accent)'
+const ACCENT_BG = 'var(--accent-subtle)'
+const ACCENT_FG = 'var(--accent-fg)'
+const FONT_BODY = 'var(--font-body)'
+const FONT_MONO = 'var(--mono)'
 
 // ---------- helpers ----------
 
@@ -58,7 +64,7 @@ function inline(text, key) {
   let i = 0
   while ((m = re.exec(text))) {
     if (m.index > last) nodes.push(text.slice(last, m.index))
-    if (m[1]) nodes.push(h('code', { key: `${key}-${i}`, style: { background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '4px', padding: '0 4px', fontSize: '0.9em' } }, m[1].slice(1, -1)))
+    if (m[1]) nodes.push(h('code', { key: `${key}-${i}`, style: { background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '4px', padding: '0 4px', fontSize: '0.9em', fontFamily: FONT_MONO } }, m[1].slice(1, -1)))
     else if (m[2]) nodes.push(h('strong', { key: `${key}-${i}` }, m[2].slice(2, -2)))
     else if (m[3]) nodes.push(h('em', { key: `${key}-${i}` }, m[3].slice(1, -1)))
     else if (m[4]) nodes.push(h('span', { key: `${key}-${i}`, style: { color: ACCENT } }, m[6] || m[5]))
@@ -79,7 +85,7 @@ function Preview({ content, onToggleCheckbox }) {
   lines.forEach((line, idx) => {
     if (line.startsWith('```')) {
       if (inCode) {
-        out.push(h('pre', { key: idx, style: { background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '6px', padding: '10px', fontSize: '12px', overflowX: 'auto' } }, codeBuf.join('\n')))
+        out.push(h('pre', { key: idx, style: { background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '6px', padding: '10px', fontSize: '12px', overflowX: 'auto', fontFamily: FONT_MONO } }, codeBuf.join('\n')))
         codeBuf = []
       }
       inCode = !inCode
@@ -110,8 +116,8 @@ function Preview({ content, onToggleCheckbox }) {
 
 function badgeStyle(status) {
   const map = {
-    pending: { background: '#fef3c7', color: '#b45309' },
-    conflict: { background: '#fee2e2', color: '#b91c1c' },
+    pending: { background: 'var(--warn-subtle)', color: 'var(--warn)' },
+    conflict: { background: 'var(--danger-subtle)', color: 'var(--danger)' },
     synced: { background: 'var(--card)', color: 'var(--muted)' },
   }
   return { ...map[status], padding: '1px 6px', borderRadius: '9999px', fontSize: '9px', fontWeight: 600 }
@@ -125,8 +131,7 @@ function NoteRow({ note, active, onOpen }) {
     onMouseLeave: () => setHover(false),
     style: {
       padding: '5px 8px', borderRadius: '6px', cursor: 'pointer',
-      background: active ? ACCENT_BG + '33' : hover ? 'var(--card)' : 'transparent',
-      borderLeft: active ? `2px solid ${ACCENT}` : '2px solid transparent',
+      background: active ? ACCENT_BG : hover ? 'var(--card)' : 'transparent',
     },
   },
     h('div', { style: { fontSize: '12px', fontWeight: active ? 600 : 400, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, note.title),
@@ -176,6 +181,28 @@ export default function MdNotebook() {
   // View mode: 'rendered' (default) or 'raw'. Persisted across visits.
   const [mode, setMode] = useState(() => localStorage.getItem('mdnb-view-mode') || 'rendered')
   const switchMode = useCallback((m) => { setMode(m); localStorage.setItem('mdnb-view-mode', m) }, [])
+  // Notes panel width, drag-resizable like the Sessions panel. Persisted.
+  const [panelW, setPanelW] = useState(() => {
+    const w = Number(localStorage.getItem('mdnb-panel-width'))
+    return w >= 180 && w <= 420 ? w : 248
+  })
+  const startResize = useCallback((e) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = panelW
+    const onMove = (ev) => {
+      const w = Math.min(420, Math.max(180, startW + (ev.clientX - startX)))
+      setPanelW(w)
+    }
+    const onUp = (ev) => {
+      const w = Math.min(420, Math.max(180, startW + (ev.clientX - startX)))
+      localStorage.setItem('mdnb-panel-width', String(w))
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [panelW])
   const saveTimer = useRef(null)
   const contentRef = useRef('')
   const pathRef = useRef(null)
@@ -288,7 +315,7 @@ export default function MdNotebook() {
     const next = new Set(prev); next.has(name) ? next.delete(name) : next.add(name); return next
   }), [])
 
-  if (vaults === null) return h('div', { style: { padding: '24px', fontSize: '12px', color: error ? '#b91c1c' : 'var(--muted)' } },
+  if (vaults === null) return h('div', { style: { padding: '24px', fontSize: '12px', fontFamily: FONT_BODY, color: error ? 'var(--danger)' : 'var(--muted)' } },
     error ? h(Fragment, null,
       `Could not reach the md-notebook backend: ${error}. It may still be starting — `,
       h('button', { onClick: () => window.location.reload(), style: { background: 'transparent', color: ACCENT, border: `1px solid ${ACCENT_BG}`, padding: '3px 12px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: 'pointer' } }, 'Retry'))
@@ -297,30 +324,50 @@ export default function MdNotebook() {
 
   const activeNote = notes.find((n) => n.path === activePath)
 
-  return h('div', { style: { display: 'flex', height: '100%', minHeight: '520px', fontFamily: 'system-ui', color: 'var(--text)' } },
-    // ---- left panel ----
-    h('div', { style: { width: '240px', flexShrink: 0, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column' } },
-      h('div', { style: { padding: '8px' } },
-        h('input', {
-          value: query, onChange: (e) => setQuery(e.target.value), placeholder: 'Search notes…',
-          style: { width: '100%', boxSizing: 'border-box', fontSize: '12px', padding: '6px 9px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', outline: 'none' },
-        })),
+  return h('div', { style: { display: 'flex', height: '100%', minHeight: '520px', fontFamily: FONT_BODY, color: 'var(--text)', background: 'var(--bg)' } },
+    // ---- left panel (Sessions-list chrome: elevated card, header, search) ----
+    h('div', { style: { width: `${panelW}px`, flexShrink: 0, display: 'flex', flexDirection: 'column', margin: '8px 0 8px 8px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '16px', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', overflow: 'hidden' } },
+      // header row: title + new-note icon button
+      h('div', { style: { height: '40px', display: 'flex', alignItems: 'center', padding: '0 8px 0 12px', flexShrink: 0 } },
+        h('span', { style: { fontSize: '13px', fontWeight: 600, color: 'var(--text)' } }, 'Notes'),
+        h('button', {
+          title: 'New note', 'aria-label': 'New note',
+          onClick: async () => {
+            const name = prompt('New note path (e.g. ideas/My Note.md):')
+            if (!name) return
+            const path = name.endsWith('.md') ? name : name + '.md'
+            await api('PUT', '/note', { path, content: `# ${path.split('/').pop().replace(/\.md$/, '')}\n` })
+            await loadNotes(); openNote(path)
+          },
+          onMouseEnter: (e) => { e.currentTarget.style.background = 'var(--bg-hover)' },
+          onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent' },
+          style: { marginLeft: 'auto', width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent', color: 'var(--muted)', border: 'none', borderRadius: '8px', cursor: 'pointer' },
+        }, h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' },
+          h('line', { x1: 12, y1: 5, x2: 12, y2: 19 }), h('line', { x1: 5, y1: 12, x2: 19, y2: 12 })))),
+      // search bar (SearchInput pattern: magnifier + clear X)
+      h('div', { style: { padding: '0 8px 4px', flexShrink: 0 } },
+        h('div', { style: { position: 'relative' } },
+          h('svg', { style: { position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }, width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--muted)', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('circle', { cx: 11, cy: 11, r: 8 }), h('line', { x1: 21, y1: 21, x2: 16.65, y2: 16.65 })),
+          h('input', {
+            value: query, onChange: (e) => setQuery(e.target.value), placeholder: 'Search notes…',
+            style: { width: '100%', boxSizing: 'border-box', fontSize: '13px', padding: '6px 26px 6px 28px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text)', outline: 'none' },
+          }),
+          query && h('button', {
+            'aria-label': 'Clear search', onClick: () => setQuery(''),
+            style: { position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'transparent', border: 'none', color: 'var(--muted)', cursor: 'pointer', padding: 0, lineHeight: 1, fontSize: '13px' },
+          }, '✕'))),
       h('div', { style: { flex: 1, overflowY: 'auto', padding: '0 6px 8px' } },
         query.trim()
           ? results.length
             ? results.map((r) => h(NoteRow, { key: r.path, note: { path: r.path, title: r.title, modifiedAt: notes.find((n) => n.path === r.path)?.modifiedAt ?? Date.now(), syncStatus: 'synced' }, active: r.path === activePath, onOpen: (p) => { openNote(p) } }))
             : h('div', { style: { padding: '10px', fontSize: '11px', color: 'var(--muted)' } }, 'No matches')
-          : renderTree(tree, 0, '', activePath, openNote, collapsed, toggle)),
-      h('button', {
-        onClick: async () => {
-          const name = prompt('New note path (e.g. ideas/My Note.md):')
-          if (!name) return
-          const path = name.endsWith('.md') ? name : name + '.md'
-          await api('PUT', '/note', { path, content: `# ${path.split('/').pop().replace(/\.md$/, '')}\n` })
-          await loadNotes(); openNote(path)
-        },
-        style: { margin: '8px', background: 'transparent', color: ACCENT, border: `1px solid ${ACCENT_BG}`, padding: '5px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: 'pointer' },
-      }, '+ New note')),
+          : renderTree(tree, 0, '', activePath, openNote, collapsed, toggle))),
+    // ---- resize handle (drag to resize the notes panel) ----
+    h('div', {
+      onPointerDown: startResize, role: 'separator', 'aria-label': 'Resize notes panel',
+      style: { width: '8px', flexShrink: 0, cursor: 'col-resize', alignSelf: 'stretch' },
+    }),
     // ---- main column ----
     h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 } },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px', borderBottom: '1px solid var(--border)' } },
@@ -339,10 +386,10 @@ export default function MdNotebook() {
           }, m === 'rendered' ? 'Rendered' : 'Raw'))),
         h('button', {
           onClick: runSync, disabled: syncing,
-          style: { background: syncing ? 'transparent' : ACCENT, color: syncing ? 'var(--muted)' : '#fff', border: 'none', padding: '5px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: syncing ? 'default' : 'pointer' },
+          style: { background: syncing ? 'transparent' : ACCENT, color: syncing ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '5px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: syncing ? 'default' : 'pointer' },
         }, syncing ? 'Syncing…' : '↕ Sync')),
-      error && h('div', { style: { margin: '8px 14px 0', padding: '6px 12px', borderRadius: '6px', background: '#fee2e2', color: '#b91c1c', fontSize: '11px' } }, error),
-      conflicts.length > 0 && h('div', { style: { margin: '8px 14px 0', padding: '6px 12px', borderRadius: '6px', background: '#fef3c7', color: '#b45309', fontSize: '11px' } },
+      error && h('div', { style: { margin: '8px 14px 0', padding: '6px 12px', borderRadius: '6px', background: 'var(--danger-subtle)', color: 'var(--danger)', fontSize: '11px' } }, error),
+      conflicts.length > 0 && h('div', { style: { margin: '8px 14px 0', padding: '6px 12px', borderRadius: '6px', background: 'var(--warn-subtle)', color: 'var(--warn)', fontSize: '11px' } },
         `Sync conflicts in: ${conflicts.map((c) => c.path).join(', ')} — local version kept on disk; resolve and sync again.`),
       !activePath
         ? h('div', { style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '12px' } }, 'Select a note from the left panel')
@@ -353,13 +400,13 @@ export default function MdNotebook() {
                     ref: taRef, value: content, spellCheck: false,
                     onChange: (e) => edit(e.target.value, e.target.selectionStart),
                     onKeyDown: (e) => { if (e.key === 'Escape') setAc(null) },
-                    style: { width: '100%', height: '100%', boxSizing: 'border-box', resize: 'none', border: 'none', outline: 'none', background: 'var(--bg)', color: 'var(--text)', padding: '14px', fontSize: '13px', fontFamily: 'ui-monospace, monospace', lineHeight: 1.55 },
+                    style: { width: '100%', height: '100%', boxSizing: 'border-box', resize: 'none', border: 'none', outline: 'none', background: 'var(--bg)', color: 'var(--text)', padding: '14px', fontSize: '13px', fontFamily: FONT_MONO, lineHeight: 1.55 },
                   }),
                   ac && h('div', { style: { position: 'absolute', left: '14px', bottom: '14px', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '6px', boxShadow: '0 4px 14px rgba(0,0,0,0.25)', overflow: 'hidden', zIndex: 5 } },
                     ac.items.map((n) => h('div', {
                       key: n.path, onClick: () => insertLink(n.title),
                       style: { padding: '5px 12px', fontSize: '12px', cursor: 'pointer', color: 'var(--text)' },
-                      onMouseEnter: (e) => { e.currentTarget.style.background = ACCENT_BG + '33' },
+                      onMouseEnter: (e) => { e.currentTarget.style.background = ACCENT_BG },
                       onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent' },
                     }, n.title))))
               : h('div', { style: { flex: 1, overflowY: 'auto', padding: '14px', minWidth: 0 } },
@@ -378,17 +425,23 @@ function ConnectVault({ onConnected }) {
   const [subfolder, setSubfolder] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [hasGhAuth, setHasGhAuth] = useState(false)
+  useEffect(() => {
+    api('GET', '/vaults').then((v) => setHasGhAuth(Boolean(v.hasGhAuth))).catch(() => {})
+  }, [])
   const field = { width: '100%', boxSizing: 'border-box', fontSize: '12px', padding: '7px 10px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', outline: 'none', marginTop: '4px' }
   const label = { fontSize: '11px', color: 'var(--muted)', display: 'block', marginTop: '12px' }
-  return h('div', { style: { maxWidth: '440px', margin: '48px auto', fontFamily: 'system-ui', color: 'var(--text)' } },
+  return h('div', { style: { maxWidth: '440px', margin: '48px auto', fontFamily: FONT_BODY, color: 'var(--text)' } },
     h('div', { style: { background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', padding: '20px' } },
       h('div', { style: { fontSize: '18px', fontWeight: 600 } }, 'Connect a vault'),
       h('div', { style: { fontSize: '11px', color: 'var(--muted)', marginTop: '4px' } }, 'A GitHub repo (or a subfolder of one) becomes your notes vault. Cloned locally; synced with git.'),
       h('label', { style: label }, 'Repository HTTPS URL', h('input', { style: field, value: url, onChange: (e) => setUrl(e.target.value), placeholder: 'https://github.com/you/notes' })),
-      h('label', { style: label }, 'Personal Access Token (fine-grained, contents read/write)', h('input', { style: field, type: 'password', value: pat, onChange: (e) => setPat(e.target.value), placeholder: 'github_pat_…' })),
+      h('label', { style: label },
+        hasGhAuth ? 'Personal Access Token (optional — using your Kiro Crew GitHub connection)' : 'Personal Access Token (fine-grained, contents read/write)',
+        h('input', { style: field, type: 'password', value: pat, onChange: (e) => setPat(e.target.value), placeholder: hasGhAuth ? 'Leave empty to use GitHub CLI auth' : 'github_pat_…' })),
       h('label', { style: label }, 'Branch', h('input', { style: field, value: branch, onChange: (e) => setBranch(e.target.value) })),
       h('label', { style: label }, 'Subfolder (optional)', h('input', { style: field, value: subfolder, onChange: (e) => setSubfolder(e.target.value), placeholder: 'notes/' })),
-      error && h('div', { style: { marginTop: '10px', fontSize: '11px', color: '#b91c1c' } }, error),
+      error && h('div', { style: { marginTop: '10px', fontSize: '11px', color: 'var(--danger)' } }, error),
       h('button', {
         disabled: busy || !url,
         onClick: async () => {
@@ -398,6 +451,6 @@ function ConnectVault({ onConnected }) {
             onConnected(vault)
           } catch (e) { setError(String(e.message)) } finally { setBusy(false) }
         },
-        style: { marginTop: '16px', background: busy ? 'transparent' : ACCENT, color: busy ? 'var(--muted)' : '#fff', border: 'none', padding: '7px 18px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer' },
+        style: { marginTop: '16px', background: busy ? 'transparent' : ACCENT, color: busy ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '7px 18px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer' },
       }, busy ? 'Cloning…' : 'Connect vault')))
 }
