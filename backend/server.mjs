@@ -11,7 +11,7 @@
  *   <home>/vaults/<id>/         local clones
  */
 import { createServer } from 'node:http'
-import { promises as fsp } from 'node:fs'
+import { promises as fsp, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve, sep } from 'node:path'
 import { cloneVault, status, sync } from '@md-notebook/core-git'
@@ -41,6 +41,35 @@ async function readPat() {
 async function writePat(pat) {
   await fsp.mkdir(HOME, { recursive: true })
   await fsp.writeFile(PAT_FILE, pat, { mode: 0o600 })
+}
+
+// ---------- GitHub CLI auth fallback ----------
+// Kiro Crew's GitHub connection is the user's `gh` CLI login. When no PAT is
+// stored, mint a token from it on demand (never persisted to disk).
+import { execFile } from 'node:child_process'
+
+function findGh() {
+  for (const c of ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', join(homedir(), '.local', 'bin', 'gh')]) {
+    try { if (statSync(c).isFile()) return c } catch { /* keep looking */ }
+  }
+  return 'gh' // hope PATH has it
+}
+
+let ghTokenCache = { value: undefined, at: 0 }
+async function ghToken() {
+  if (Date.now() - ghTokenCache.at < 300_000) return ghTokenCache.value
+  const value = await new Promise((resolve) => {
+    execFile(findGh(), ['auth', 'token'], { timeout: 5000 }, (err, stdout) => {
+      resolve(err ? undefined : stdout.trim() || undefined)
+    })
+  })
+  ghTokenCache = { value, at: Date.now() }
+  return value
+}
+
+/** Auth for git operations: explicit stored PAT wins, else gh CLI login. */
+async function resolveAuth() {
+  return (await readPat()) ?? (await ghToken())
 }
 
 // ---------- vault scanning ----------
@@ -145,7 +174,7 @@ const routes = {
   'GET /health': async (req, res) => send(res, 200, { ok: true }),
 
   'GET /api/vaults': async (req, res) => {
-    send(res, 200, { vaults: await readVaults(), hasPat: Boolean(await readPat()) })
+    send(res, 200, { vaults: await readVaults(), hasPat: Boolean(await readPat()), hasGhAuth: Boolean(await ghToken()) })
   },
 
   /** Connect a vault: { url, name?, branch?, subfolder?, pat? } */
@@ -153,7 +182,7 @@ const routes = {
     const body = await readBody(req)
     if (!body.url) return send(res, 400, { error: 'url is required' })
     if (body.pat) await writePat(body.pat)
-    const pat = await readPat()
+    const pat = await resolveAuth()
     const vaults = await readVaults()
     const id = `v${Date.now().toString(36)}`
     const vault = await cloneVault({
@@ -223,7 +252,7 @@ const routes = {
 
   'POST /api/sync': async (req, res, url) => {
     const vault = await requireVault(url)
-    const result = await sync(vault.localPath, { branch: vault.branch, pat: await readPat() })
+    const result = await sync(vault.localPath, { branch: vault.branch, pat: await resolveAuth() })
     await rebuildCache(vault)
     send(res, 200, { result })
   },
