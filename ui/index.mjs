@@ -74,19 +74,6 @@ const SORTS = {
 }
 const DEFAULT_SORT = 'name-asc'
 
-/**
- * The standard Markdown mark (rounded frame + "M" + down arrow), drawn in
- * lucide's stroke language (2px, round joins) so it sits beside lucide icons.
- * Lucide ships no markdown glyph, hence the hand-built path.
- */
-function MarkdownIcon({ size = 14 }) {
-  return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-    h('rect', { x: 2, y: 5, width: 20, height: 14, rx: 2 }),
-    h('path', { d: 'M6 15V9l3 3 3-3v6' }),
-    h('path', { d: 'M17 9v6' }),
-    h('path', { d: 'm15 13 2 2 2-2' }))
-}
-
 /** Short "time since" label for the Sync button ("just now", "5m ago"). */
 function agoLabel(ms) {
   const d = Date.now() - ms
@@ -911,7 +898,7 @@ export default function MdNotebook() {
   if (vaults === null) return h('div', { style: { padding: '24px', fontSize: '12px', fontFamily: FONT_BODY, color: error ? 'var(--danger)' : 'var(--muted)' } },
     error ? h(Fragment, null,
       `Could not reach the Notes backend: ${error}. It may still be starting — `,
-      h('button', { onClick: () => window.location.reload(), style: { background: 'transparent', color: ACCENT, border: `1px solid ${ACCENT_BG}`, padding: '3px 12px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: 'pointer' } }, 'Retry'))
+      h('button', { onClick: () => window.location.reload(), style: { background: 'transparent', color: ACCENT, border: `1px solid ${ACCENT_BG}`, padding: '3px 12px', borderRadius: '8px', fontSize: '11px', fontWeight: 500, cursor: 'pointer' } }, 'Retry'))
       : 'Loading…')
   if (!vaults.length || showConnect) return h(ConnectVault, {
     onCancel: vaults.length ? () => setShowConnect(false) : null,
@@ -1118,24 +1105,29 @@ export default function MdNotebook() {
         // reaches this far stays legible underneath.
         h('div', { style: { position: 'absolute', top: '24px', right: '20px', zIndex: 2, display: 'flex', alignItems: 'center', gap: '10px', background: 'var(--bg)', paddingLeft: '10px' } },
           dirty && h('span', { style: { fontSize: '10px', color: 'var(--muted)', flexShrink: 0 } }, 'saving…'),
-          h('div', { style: { display: 'flex', border: '1px solid var(--border)', borderRadius: '9999px', overflow: 'hidden' } },
-            [['rendered', 'Rendered view'], ['raw', 'Raw markdown']].map(([m, label]) => h('button', {
+          // View switch — Figma node 288:35. Track: 4px padding, 4px gap,
+          // 12px radius, no stroke. Segments: 4px padding, 8px radius, 16px
+          // icons. Active = solid accent fill with an accent-fg icon; inactive
+          // = transparent with a muted icon. Kiro Purple #8E47FF is exactly
+          // --accent and the white icon is --accent-fg, so this stays themed.
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', padding: '4px', borderRadius: '12px', background: 'var(--card)' } },
+            [['rendered', 'Rendered view', lucide.FileText], ['raw', 'Raw markdown', lucide.Code]].map(([m, label, Icon]) => h('button', {
               key: m, onClick: () => switchMode(m),
               // Icon-only, so the label lives in title + aria-label.
               title: label, 'aria-label': label, 'aria-pressed': mode === m,
               style: {
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: mode === m ? ACCENT_BG : 'transparent',
-                color: mode === m ? ACCENT : 'var(--muted)',
-                border: 'none', padding: '4px 12px', cursor: 'pointer',
+                padding: '4px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                background: mode === m ? ACCENT : 'transparent',
+                color: mode === m ? ACCENT_FG : 'var(--muted)',
               },
-            }, m === 'rendered' ? h(lucide.FileText, { size: 14 }) : h(MarkdownIcon, { size: 14 })))),
+            }, h(Icon, { size: 16 })))),
           h('button', {
             onClick: runSync, disabled: syncing,
             title: syncing ? 'Syncing…' : lastSync ? `Last synced ${new Date(lastSync).toLocaleString()} — click to sync now` : 'Never synced — click to sync now',
             // minWidth keeps the header from shifting as the label changes
             // between "Syncing…", "just now" and "12m ago".
-            style: { minWidth: '86px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '5px', background: syncing ? 'transparent' : ACCENT, color: syncing ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '5px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: syncing ? 'default' : 'pointer' },
+            style: { minWidth: '86px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '5px', background: syncing ? 'transparent' : ACCENT, color: syncing ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '5px 14px', borderRadius: '12px', fontSize: '11px', fontWeight: 500, cursor: syncing ? 'default' : 'pointer' },
           },
             h(lucide.RefreshCw, { size: 12, style: { flexShrink: 0 } }),
             syncing
@@ -1166,11 +1158,11 @@ export default function MdNotebook() {
         h('span', { style: { flex: 1, minWidth: '160px' } }, `“${fileConflict.path}” changed on disk while you were editing it. Nothing was overwritten — choose which version to keep.`),
         h('button', {
           onClick: () => resolveConflict('mine'),
-          style: { background: 'var(--danger)', color: 'var(--accent-fg)', border: 'none', padding: '4px 12px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: 'pointer', flexShrink: 0 },
+          style: { background: 'var(--danger)', color: 'var(--accent-fg)', border: 'none', padding: '4px 12px', borderRadius: '12px', fontSize: '11px', fontWeight: 500, cursor: 'pointer', flexShrink: 0 },
         }, 'Keep my version'),
         h('button', {
           onClick: () => resolveConflict('disk'),
-          style: { background: 'transparent', color: 'var(--danger)', border: '1px solid var(--danger)', padding: '4px 12px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: 'pointer', flexShrink: 0 },
+          style: { background: 'transparent', color: 'var(--danger)', border: '1px solid var(--danger)', padding: '4px 12px', borderRadius: '8px', fontSize: '11px', fontWeight: 500, cursor: 'pointer', flexShrink: 0 },
         }, 'Use the file on disk')),
       // A note changed outside the app; adopted silently unless we had edits.
       // Only surfaced when there ARE unsaved local edits — a clean note just
@@ -1188,14 +1180,27 @@ export default function MdNotebook() {
         ? h('div', { style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '12px' } }, 'Select a note from the left panel')
         : h('div', { style: { flex: 1, display: 'flex', minHeight: 0 } },
             mode === 'raw'
-              ? h('div', { style: { flex: 1, position: 'relative' } },
+              // The textarea spans the full pane so its scrollbar sits at the
+              // far right, like the rendered view's scroll container. The text
+              // is centered instead by padding: the rendered column is 800px
+              // wide with 20px sides, i.e. a 760px measure, so each side gets
+              // (100% - 760px)/2 — floored at 20px on narrow panes.
+              ? h('div', { style: { flex: 1, position: 'relative', display: 'flex', minHeight: 0 } },
                   h('textarea', {
                     ref: taRef, value: content, spellCheck: false,
                     onChange: (e) => edit(e.target.value, e.target.selectionStart),
                     onKeyDown: (e) => { if (e.key === 'Escape') setAc(null) },
-                    style: { width: '100%', height: '100%', boxSizing: 'border-box', resize: 'none', border: 'none', outline: 'none', background: 'var(--bg)', color: 'var(--text)', padding: '14px', fontSize: '13px', fontFamily: FONT_MONO, lineHeight: 1.55 },
+                    style: {
+                      flex: 1, width: '100%', minHeight: 0, boxSizing: 'border-box',
+                      resize: 'none', border: 'none', outline: 'none',
+                      background: 'var(--bg)', color: 'var(--text)',
+                      paddingTop: '14px', paddingBottom: '14px',
+                      paddingLeft: 'max(20px, calc((100% - 760px) / 2))',
+                      paddingRight: 'max(20px, calc((100% - 760px) / 2))',
+                      fontSize: '13px', fontFamily: FONT_MONO, lineHeight: 1.55,
+                    },
                   }),
-                  ac && h('div', { style: { position: 'absolute', left: '14px', bottom: '14px', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '6px', boxShadow: '0 4px 14px rgba(0,0,0,0.25)', overflow: 'hidden', zIndex: 5 } },
+                  ac && h('div', { style: { position: 'absolute', left: 'max(20px, calc((100% - 760px) / 2))', bottom: '14px', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '6px', boxShadow: '0 4px 14px rgba(0,0,0,0.25)', overflow: 'hidden', zIndex: 5 } },
                     ac.items.map((n) => h('div', {
                       key: n.path, onClick: () => insertLink(n.title),
                       style: { padding: '5px 12px', fontSize: '12px', cursor: 'pointer', color: 'var(--text)' },
@@ -1272,7 +1277,7 @@ function SettingsModal({ vaults, activeVaultId, hasPat, hasGhAuth, autoSync, aut
   const field = { boxSizing: 'border-box', fontSize: '12px', padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', outline: 'none' }
   const pill = (primary) => ({
     background: primary ? ACCENT : 'transparent', color: primary ? ACCENT_FG : 'var(--muted)',
-    border: primary ? 'none' : '1px solid var(--border)', padding: '5px 14px', borderRadius: '9999px',
+    border: primary ? 'none' : '1px solid var(--border)', padding: '5px 14px', borderRadius: primary ? '12px' : '8px',
     fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer', flexShrink: 0,
   })
 
@@ -1427,7 +1432,7 @@ function ConnectVault({ onConnected, onCancel }) {
     h('div', { style: { background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', padding: '20px' } },
       h('div', { style: { fontSize: '18px', fontWeight: 600 } }, 'Connect a vault'),
       // mode toggle (segmented pill, same recipe as the Rendered|Raw switch)
-      h('div', { style: { display: 'flex', border: '1px solid var(--border)', borderRadius: '9999px', overflow: 'hidden', marginTop: '12px', width: 'fit-content' } },
+      h('div', { style: { display: 'flex', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', marginTop: '12px', width: 'fit-content' } },
         [['clone', 'Clone a repo'], ['attach', 'Use a local folder']].map(([m, text]) => h('button', {
           key: m, onClick: () => { setMode(m); setError(null) },
           style: { background: mode === m ? ACCENT_BG : 'transparent', color: mode === m ? ACCENT : 'var(--muted)', border: 'none', padding: '4px 12px', fontSize: '11px', fontWeight: 500, cursor: 'pointer' },
@@ -1457,10 +1462,10 @@ function ConnectVault({ onConnected, onCancel }) {
             onConnected(vault)
           } catch (e) { setError(String(e.message)) } finally { setBusy(false) }
         },
-        style: { marginTop: '16px', background: busy ? 'transparent' : ACCENT, color: busy ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '7px 18px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer' },
+        style: { marginTop: '16px', background: busy ? 'transparent' : ACCENT, color: busy ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '7px 18px', borderRadius: '12px', fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer' },
       }, busy ? (attaching ? 'Attaching…' : 'Cloning…') : (attaching ? 'Attach folder' : 'Connect vault')),
       onCancel && h('button', {
         onClick: onCancel, disabled: busy,
-        style: { marginTop: '16px', marginLeft: '8px', background: 'transparent', color: 'var(--muted)', border: '1px solid var(--border)', padding: '7px 18px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer' },
+        style: { marginTop: '16px', marginLeft: '8px', background: 'transparent', color: 'var(--muted)', border: '1px solid var(--border)', padding: '7px 18px', borderRadius: '8px', fontSize: '11px', fontWeight: 500, cursor: busy ? 'default' : 'pointer' },
       }, 'Cancel')))
 }
