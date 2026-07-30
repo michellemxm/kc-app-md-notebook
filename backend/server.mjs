@@ -242,14 +242,14 @@ const routes = {
    */
   'GET /health': async (req, res) => send(res, 200, {
     ok: true,
-    features: ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat'],
+    features: ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat', 'newNote', 'move'],
   }),
 
   // Same probe under /api so the UI can reach it through the gateway's
   // /apps/<name>/api/* proxy (the bare /health path is the gateway's own check).
   'GET /api/health': async (req, res) => send(res, 200, {
     ok: true,
-    features: ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat'],
+    features: ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat', 'newNote', 'move'],
   }),
 
   'GET /api/vaults': async (req, res) => {
@@ -427,6 +427,58 @@ const routes = {
     const cache = await getCache(vault)
     cache.index.remove(path)
     send(res, 200, { ok: true })
+  },
+
+  /**
+   * Create an empty note with a guaranteed-free name and return its path.
+   * Body: { folder? } — vault-root by default. Naming/uniqueness is decided
+   * here rather than in the UI so two quick clicks can't collide on a name
+   * (or silently overwrite a file the UI's cached listing didn't know about).
+   */
+  'POST /api/note/new': async (req, res, url) => {
+    const vault = await requireVault(url)
+    if (vault.readOnly) return send(res, 403, { error: 'vault is read-only' })
+    const { folder } = await readBody(req)
+    const root = contentRoot(vault)
+    const dir = folder ? safeJoin(root, folder) : root
+    await fsp.mkdir(dir, { recursive: true })
+    let name = 'Untitled.md'
+    for (let n = 2; n < 1000; n++) {
+      try { await fsp.stat(join(dir, name)); name = `Untitled ${n}.md` } catch { break }
+    }
+    const rel = (folder ? `${folder}/` : '') + name
+    const title = name.replace(/\.md$/, '')
+    const content = `# ${title}\n`
+    await fsp.writeFile(join(dir, name), content, { flag: 'wx' })
+    markSelfWrite(join(dir, name))
+    const cache = await getCache(vault)
+    cache.index.update({ path: rel, title, content })
+    send(res, 200, { path: rel })
+  },
+
+  /**
+   * Move (or rename) a note: { from, to }. `to` may name a folder that does
+   * not exist yet. Refuses to overwrite an existing file.
+   */
+  'POST /api/note/move': async (req, res, url) => {
+    const vault = await requireVault(url)
+    if (vault.readOnly) return send(res, 403, { error: 'vault is read-only' })
+    const { from, to } = await readBody(req)
+    if (!from || !to) return send(res, 400, { error: 'from and to are required' })
+    if (from === to) return send(res, 200, { ok: true, path: to })
+    const root = contentRoot(vault)
+    const src = safeJoin(root, from)
+    const dst = safeJoin(root, to)
+    try {
+      await fsp.stat(dst)
+      return send(res, 409, { error: `a note already exists at ${to}` })
+    } catch { /* free */ }
+    await fsp.mkdir(dirname(dst), { recursive: true })
+    await fsp.rename(src, dst)
+    markSelfWrite(src); markSelfWrite(dst)
+    // Path is part of the index/backlink identity, so rebuild rather than patch.
+    await rebuildCache(vault)
+    send(res, 200, { ok: true, path: to })
   },
 
   'POST /api/sync': async (req, res, url) => {

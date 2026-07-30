@@ -37,6 +37,14 @@ async function api(method, path, body) {
     const err = new Error(json.error || res.statusText)
     err.status = res.status
     err.body = json
+    // A "no route" reply means the backend process predates this UI bundle —
+    // the gateway keeps app backends alive across reloads. Translate it here so
+    // ANY endpoint added later fails with an actionable message, without having
+    // to remember to register it in the capability list below.
+    if (/^no route: /.test(String(json.error ?? ''))) {
+      err.staleBackend = true
+      err.message = 'The Notes backend is running older code than this page. Toggle Notes off and on in the Apps page to restart it.'
+    }
     throw err
   }
   return json
@@ -195,6 +203,64 @@ function BlockEditor({ initial, onCommit, onCancel, textStyle }) {
   })
 }
 
+/**
+ * Inline title, Obsidian-style: the note's FILENAME rendered as the first line
+ * of the document (h1 scale) rather than tucked into the app chrome. Click to
+ * edit; committing renames the file on disk.
+ *
+ * It is deliberately not part of the markdown text — the file's own first line
+ * stays whatever the user wrote, so nothing is consumed or hidden.
+ */
+function InlineTitle({ path, onRename, mb = '8px' }) {
+  const name = path.split('/').pop().replace(/\.md$/i, '')
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(name)
+  const ref = useRef(null)
+  // Switching notes must never carry an open edit (or a stale value) across.
+  useEffect(() => { setEditing(false); setValue(name) }, [path, name])
+  // Auto-size while editing so a wrapped title keeps the same height it had
+  // when rendered — no jump between display and edit.
+  const autoSize = useCallback(() => {
+    const ta = ref.current
+    if (!ta) return
+    ta.style.height = 'auto'
+    ta.style.height = `${ta.scrollHeight}px`
+  }, [])
+  useEffect(() => {
+    if (!editing || !ref.current) return
+    autoSize()
+    ref.current.focus(); ref.current.select()
+  }, [editing, autoSize])
+
+  // Explicit px rather than the 1.802em h1 ramp: this renders in the chrome
+  // header, which has no 13px reading-column base for em to resolve against.
+  const shared = { fontSize: '23px', fontWeight: 700, lineHeight: 1.25, fontFamily: FONT_BODY }
+  if (!editing) {
+    return h('div', {
+      className: 'mdnb-blk',
+      onClick: () => { setValue(name); setEditing(true) },
+      title: 'Click to rename this note',
+      // Wraps across lines for long names rather than truncating.
+      style: { ...shared, cursor: 'text', borderRadius: '4px', padding: '0 4px', margin: `0 -4px ${mb}`, whiteSpace: 'normal', overflowWrap: 'anywhere' },
+    }, name)
+  }
+  return h('textarea', {
+    ref, value, spellCheck: false, rows: 1, 'aria-label': 'Note title',
+    onChange: (e) => { setValue(e.target.value.replace(/\n/g, '')); autoSize() },
+    onBlur: () => { setEditing(false); if (value.trim() && value.trim() !== name) onRename(value) },
+    onKeyDown: (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setValue(name); setEditing(false) }
+      else if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur() }
+    },
+    style: {
+      ...shared, width: '100%', boxSizing: 'border-box', display: 'block', resize: 'none', overflow: 'hidden',
+      background: 'var(--bg-elevated)', color: 'var(--text)',
+      border: `1px solid ${ACCENT_BG}`, borderRadius: '4px',
+      padding: '0 4px', margin: `0 -4px ${mb}`, outline: 'none',
+    },
+  })
+}
+
 function Preview({ content, onToggleCheckbox, editRange, onStartEdit, onCommitEdit, onCancelEdit }) {
   const body = content.replace(FM_RE, '')
   const lines = body.split('\n')
@@ -295,6 +361,12 @@ function NoteRow({ note, active, onOpen, showFolder }) {
   return h('div', {
     className: 'mdnb-row',
     onClick: () => onOpen(note.path),
+    // Drag a note onto a folder row (or the list background) to file it.
+    draggable: true,
+    onDragStart: (e) => {
+      e.dataTransfer.setData('text/plain', note.path)
+      e.dataTransfer.effectAllowed = 'move'
+    },
     style: {
       padding: '8px 16px', borderRadius: '8px', cursor: 'pointer',
       ...(active ? { background: ACCENT_BG } : null),
@@ -311,24 +383,33 @@ function NoteRow({ note, active, onOpen, showFolder }) {
       note.syncStatus !== 'synced' && h('span', { style: badgeStyle(note.syncStatus) }, note.syncStatus)))
 }
 
-function Folder({ name, node, depth, activePath, onOpen, collapsed, toggle, cmp }) {
+function Folder({ name, node, depth, activePath, onOpen, collapsed, toggle, cmp, onMove }) {
   const isCollapsed = collapsed.has(name)
+  const [dropping, setDropping] = useState(false)
   // Sessions folder-row recipe: text-[12px] text-muted py-1 gap-2 rounded-md,
   // hover raises text + bg (via .mdnb-row CSS + inherit color).
   return h(Fragment, null,
     h('div', {
       className: 'mdnb-row',
       onClick: () => toggle(name),
-      style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 8px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 400, color: 'var(--muted)', marginLeft: depth * 10 },
+      // Drop target: filing a dragged note into this folder.
+      onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; setDropping(true) },
+      onDragLeave: () => setDropping(false),
+      onDrop: (e) => {
+        e.preventDefault(); e.stopPropagation(); setDropping(false)
+        const from = e.dataTransfer.getData('text/plain')
+        if (from) onMove?.(from, name)
+      },
+      style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 8px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 400, color: dropping ? ACCENT : 'var(--muted)', marginLeft: depth * 10, ...(dropping ? { background: ACCENT_BG, outline: `1px solid ${ACCENT}` } : null) },
     }, h('span', {
       // Sessions folder-row recipe: ChevronRight 14px, muted, rotate(0) when
       // collapsed / rotate(90) when open. No transition — their folder rows
       // snap, and a click shouldn't animate.
-      style: { display: 'flex', alignItems: 'center', flexShrink: 0, color: 'var(--muted)', transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' },
+      style: { display: 'flex', alignItems: 'center', flexShrink: 0, color: 'inherit', transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' },
     }, h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
       h('path', { d: 'm9 18 6-6-6-6' }))), name.split('/').pop(),
-      h('span', { style: { marginLeft: 'auto', fontSize: '10px', color: 'var(--muted)' } }, countNotes(node))),
-    !isCollapsed && h('div', { style: { marginLeft: depth * 10 + 8 } }, renderTree(node, depth + 1, name, activePath, onOpen, collapsed, toggle, cmp)))
+      h('span', { style: { marginLeft: 'auto', fontSize: '10px', color: 'inherit' } }, countNotes(node))),
+    !isCollapsed && h('div', { style: { marginLeft: depth * 10 + 8 } }, renderTree(node, depth + 1, name, activePath, onOpen, collapsed, toggle, cmp, onMove)))
 }
 
 function countNotes(node) {
@@ -337,12 +418,12 @@ function countNotes(node) {
   return n
 }
 
-function renderTree(node, depth, prefix, activePath, onOpen, collapsed, toggle, cmp) {
+function renderTree(node, depth, prefix, activePath, onOpen, collapsed, toggle, cmp, onMove) {
   const items = []
   // Folders stay alphabetical; the sort choice applies to notes within each.
   for (const [name, child] of [...node.folders].sort((a, b) => a[0].localeCompare(b[0]))) {
     const full = prefix ? `${prefix}/${name}` : name
-    items.push(h(Folder, { key: full, name: full, node: child, depth, activePath, onOpen, collapsed, toggle, cmp }))
+    items.push(h(Folder, { key: full, name: full, node: child, depth, activePath, onOpen, collapsed, toggle, cmp, onMove }))
   }
   for (const n of [...node.notes].sort(cmp)) {
     items.push(h(NoteRow, { key: n.path, note: n, active: n.path === activePath, onOpen }))
@@ -457,7 +538,7 @@ export default function MdNotebook() {
   // process can still be serving — detect that and say so plainly.
   const [staleBackend, setStaleBackend] = useState(null)
   useEffect(() => {
-    const REQUIRED = ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat']
+    const REQUIRED = ['createdAt', 'attach', 'changes', 'saveGuard', 'forget', 'pat', 'newNote', 'move']
     let cancelled = false
     api('GET', '/health').then((h) => {
       if (cancelled) return
@@ -738,6 +819,41 @@ export default function MdNotebook() {
     } catch (e) { setError(String(e.message)) } finally { setSyncing(false) }
   }, [flushSave, loadNotes, openNote])
 
+  /** Move a note to an exact new path, following it if it's the open one. */
+  const relocate = useCallback(async (from, to) => {
+    if (!to || to === from) return
+    try {
+      // Flush pending edits at the OLD path first, then retarget the ref before
+      // anything else can save — otherwise a stray autosave would recreate the
+      // file we just moved away from.
+      if (pathRef.current === from && dirtyRef.current) await flushSave()
+      await api('POST', vq('/note/move'), { from, to })
+      if (pathRef.current === from) {
+        pathRef.current = to
+        setActivePath(to)
+        localStorage.setItem('mdnb-open-note', to)
+      }
+      await loadNotes()
+      if (pathRef.current === to) await openNote(to)
+    } catch (e) { setError(String(e.message)) }
+  }, [flushSave, loadNotes, openNote, vq])
+
+  /** File a note into `folder` ('' = vault root), keeping its filename. */
+  const moveNote = useCallback((from, folder) => {
+    const name = from.split('/').pop()
+    return relocate(from, folder ? `${folder}/${name}` : name)
+  }, [relocate])
+
+  /** Rename a note in place from the inline title, keeping its folder. */
+  const renameNote = useCallback((from, nextName) => {
+    // Strip path separators and characters that are illegal in filenames, so a
+    // title edit can never move the note or produce an unopenable name.
+    const clean = String(nextName).replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 120)
+    if (!clean) return undefined
+    const dir = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : ''
+    return relocate(from, `${dir ? `${dir}/` : ''}${clean}.md`)
+  }, [relocate])
+
   // Load the stored last-sync time for whichever vault is active.
   useEffect(() => {
     if (!activeVaultId) { setLastSync(null); return }
@@ -805,8 +921,6 @@ export default function MdNotebook() {
       switchVault(v.id)
     },
   })
-
-  const activeNote = notes.find((n) => n.path === activePath)
 
   return h('div', { style: { display: 'flex', height: '100%', minHeight: '520px', position: 'relative', fontFamily: FONT_BODY, color: 'var(--text)', background: 'var(--bg)' } },
     // Row hover mirrors the Sessions list (hover:bg-bg-hover hover:text-text).
@@ -892,11 +1006,13 @@ export default function MdNotebook() {
         h('button', {
           title: 'New note', 'aria-label': 'New note',
           onClick: async () => {
-            const name = prompt('New note path (e.g. ideas/My Note.md):')
-            if (!name) return
-            const path = name.endsWith('.md') ? name : name + '.md'
-            await api('PUT', vq('/note'), { path, content: `# ${path.split('/').pop().replace(/\.md$/, '')}\n` })
-            await loadNotes(); openNote(path)
+            try {
+              // Created at the vault root with a free "Untitled" name; drag it
+              // onto a folder afterwards to file it.
+              const { path } = await api('POST', vq('/note/new'), {})
+              await loadNotes()
+              openNote(path)
+            } catch (e) { setError(String(e.message)) }
           },
           onMouseEnter: (e) => { e.currentTarget.style.background = 'var(--bg-hover)' },
           onMouseLeave: (e) => { e.currentTarget.style.background = 'transparent' },
@@ -950,7 +1066,17 @@ export default function MdNotebook() {
               h('span', { style: { flex: 1, whiteSpace: 'nowrap' } }, label),
               sortKey === k && h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--accent)', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { flexShrink: 0 } },
                 h('path', { d: 'M20 6 9 17l-5-5' }))))))),
-      h('div', { style: { flex: 1, overflowY: 'auto', padding: '8px' } },
+      h('div', {
+        style: { flex: 1, overflowY: 'auto', padding: '8px' },
+        // Dropping on the list background (not on a folder row) files the note
+        // at the vault root; folder rows stopPropagation so they win.
+        onDragOver: (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' },
+        onDrop: (e) => {
+          e.preventDefault()
+          const from = e.dataTransfer.getData('text/plain')
+          if (from) moveNote(from, '')
+        },
+      },
         query.trim()
           ? results.length
             ? results.map((r) => h(NoteRow, { key: r.path, note: { path: r.path, title: r.title, modifiedAt: notes.find((n) => n.path === r.path)?.modifiedAt ?? Date.now(), syncStatus: 'synced' }, active: r.path === activePath, onOpen: (p) => { openNote(p) } }))
@@ -958,7 +1084,7 @@ export default function MdNotebook() {
           : view === 'list'
             // Plain list: every note flat, ordered purely by the sort choice.
             ? [...notes].sort(SORTS[sortKey].cmp).map((n) => h(NoteRow, { key: n.path, note: n, active: n.path === activePath, onOpen: openNote, showFolder: true }))
-            : renderTree(tree, 0, '', activePath, openNote, collapsed, toggle, SORTS[sortKey].cmp)),
+            : renderTree(tree, 0, '', activePath, openNote, collapsed, toggle, SORTS[sortKey].cmp, moveNote)),
       // ---- bottom-fixed Settings bar (Contact Us recipe, same layout and
       // dimensions as the old vault selector row): label left, gear right ----
       h('div', { style: { flexShrink: 0, marginTop: '4px' } },
@@ -986,35 +1112,52 @@ export default function MdNotebook() {
       })),
     // ---- main column ----
     h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 } },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: panelOpen ? '10px 14px' : '10px 14px 10px 48px', borderBottom: '1px solid var(--border)' } },
-        h('span', { style: { fontSize: '15px', fontWeight: 600 } }, activeNote?.title ?? 'Notes'),
-        h('span', { style: { background: ACCENT_BG, color: ACCENT, padding: '2px 8px', borderRadius: '9999px', fontSize: '10px', fontWeight: 600 } }, (vaults.find((v) => v.id === activeVaultId) ?? vaults[0]).name),
-        dirty && h('span', { style: { fontSize: '10px', color: 'var(--muted)' } }, 'saving…'),
-        h('span', { style: { marginLeft: 'auto' } }),
-        h('div', { style: { display: 'flex', border: '1px solid var(--border)', borderRadius: '9999px', overflow: 'hidden' } },
-          [['rendered', 'Rendered view'], ['raw', 'Raw markdown']].map(([m, label]) => h('button', {
-            key: m, onClick: () => switchMode(m),
-            // Icon-only, so the label lives in title + aria-label.
-            title: label, 'aria-label': label, 'aria-pressed': mode === m,
-            style: {
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              background: mode === m ? ACCENT_BG : 'transparent',
-              color: mode === m ? ACCENT : 'var(--muted)',
-              border: 'none', padding: '4px 12px', cursor: 'pointer',
-            },
-          }, m === 'rendered' ? h(lucide.FileText, { size: 14 }) : h(MarkdownIcon, { size: 14 })))),
-        h('button', {
-          onClick: runSync, disabled: syncing,
-          title: syncing ? 'Syncing…' : lastSync ? `Last synced ${new Date(lastSync).toLocaleString()} — click to sync now` : 'Never synced — click to sync now',
-          // minWidth keeps the header from shifting as the label changes
-          // between "Syncing…", "just now" and "12m ago".
-          style: { minWidth: '86px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '5px', background: syncing ? 'transparent' : ACCENT, color: syncing ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '5px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: syncing ? 'default' : 'pointer' },
-        },
-          h(lucide.RefreshCw, { size: 12, style: { flexShrink: 0 } }),
-          syncing
-            ? h('span', null, 'Syncing', h('span', { className: 'mdnb-dots', 'aria-hidden': true },
-                h('span', null, '.'), h('span', null, '.'), h('span', null, '.')))
-            : h('span', null, lastSync ? agoLabel(lastSync) : 'Sync'))),
+      h('div', { style: { position: 'relative' } },
+        // Controls pinned to the PANE's right edge (outside the reading column),
+        // with the header background behind them so a long wrapped title that
+        // reaches this far stays legible underneath.
+        h('div', { style: { position: 'absolute', top: '24px', right: '20px', zIndex: 2, display: 'flex', alignItems: 'center', gap: '10px', background: 'var(--bg)', paddingLeft: '10px' } },
+          dirty && h('span', { style: { fontSize: '10px', color: 'var(--muted)', flexShrink: 0 } }, 'saving…'),
+          h('div', { style: { display: 'flex', border: '1px solid var(--border)', borderRadius: '9999px', overflow: 'hidden' } },
+            [['rendered', 'Rendered view'], ['raw', 'Raw markdown']].map(([m, label]) => h('button', {
+              key: m, onClick: () => switchMode(m),
+              // Icon-only, so the label lives in title + aria-label.
+              title: label, 'aria-label': label, 'aria-pressed': mode === m,
+              style: {
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: mode === m ? ACCENT_BG : 'transparent',
+                color: mode === m ? ACCENT : 'var(--muted)',
+                border: 'none', padding: '4px 12px', cursor: 'pointer',
+              },
+            }, m === 'rendered' ? h(lucide.FileText, { size: 14 }) : h(MarkdownIcon, { size: 14 })))),
+          h('button', {
+            onClick: runSync, disabled: syncing,
+            title: syncing ? 'Syncing…' : lastSync ? `Last synced ${new Date(lastSync).toLocaleString()} — click to sync now` : 'Never synced — click to sync now',
+            // minWidth keeps the header from shifting as the label changes
+            // between "Syncing…", "just now" and "12m ago".
+            style: { minWidth: '86px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '5px', background: syncing ? 'transparent' : ACCENT, color: syncing ? 'var(--muted)' : ACCENT_FG, border: 'none', padding: '5px 14px', borderRadius: '9999px', fontSize: '11px', fontWeight: 500, cursor: syncing ? 'default' : 'pointer' },
+          },
+            h(lucide.RefreshCw, { size: 12, style: { flexShrink: 0 } }),
+            syncing
+              ? h('span', null, 'Syncing', h('span', { className: 'mdnb-dots', 'aria-hidden': true },
+                  h('span', null, '.'), h('span', null, '.'), h('span', null, '.')))
+              : h('span', null, lastSync ? agoLabel(lastSync) : 'Sync'))),
+        // Title + breadcrumb share the rendered content's reading column (max
+        // 800px, 20px side padding), so both edges line up with the markdown.
+        h('div', { style: { margin: '0 auto', width: '100%', maxWidth: '800px', boxSizing: 'border-box', padding: '24px 20px 14px' } },
+          activePath
+            ? h(InlineTitle, { path: activePath, onRename: (n) => renameNote(activePath, n), mb: '0' })
+            : h('div', { style: { fontSize: '23px', fontWeight: 700, lineHeight: 1.25, color: 'var(--muted)' } }, 'Notes'),
+          // Location line under the title: "vault/folder/folder/" — same ramp as
+          // the notes-list metadata (11px / 400 / muted), no pill.
+          activePath && h('div', {
+            title: `${(vaults.find((v) => v.id === activeVaultId) ?? vaults[0]).name}/${activePath}`,
+            style: { fontSize: '11px', fontWeight: 400, color: 'var(--muted)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+          }, `${(vaults.find((v) => v.id === activeVaultId) ?? vaults[0]).name}/${activePath.includes('/') ? `${activePath.slice(0, activePath.lastIndexOf('/'))}/` : ''}`)),
+        // Divider: runs the full pane width, inset 24px from each pane edge.
+        // A margin (not padding on the wrapper) keeps it from affecting how the
+        // centered title column above it is laid out.
+        h('div', { style: { borderTop: '1px solid var(--border)', margin: '0 20px' } })),
       staleBackend && h('div', { style: { margin: '8px 14px 0', padding: '6px 12px', borderRadius: '6px', background: 'var(--warn-subtle)', color: 'var(--warn)', fontSize: '11px' } },
         `The Notes backend is running older code, so some features are unavailable (${staleBackend.join(', ')}). Toggle Notes off and on in the Apps page to restart it.`),
       error && h('div', { style: { margin: '8px 14px 0', padding: '6px 12px', borderRadius: '6px', background: 'var(--danger-subtle)', color: 'var(--danger)', fontSize: '11px' } }, error),

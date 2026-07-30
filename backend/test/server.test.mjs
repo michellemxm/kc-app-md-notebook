@@ -117,6 +117,33 @@ describe('md-notebook backend', () => {
     expect(notes.some((n) => n.path === 'new/Draft.md')).toBe(false)
   })
 
+  it('creates notes with unique Untitled names and moves them between folders', async () => {
+    const first = await api('POST', '/api/note/new', {})
+    expect(first.status).toBe(200)
+    expect(first.body.path).toBe('Untitled.md')
+
+    // A second click must not collide with (or overwrite) the first.
+    const second = await api('POST', '/api/note/new', {})
+    expect(second.body.path).toBe('Untitled 2.md')
+
+    // Seeded with a heading matching the filename.
+    const read = await api('GET', '/api/note?path=Untitled.md')
+    expect(read.body.content).toBe('# Untitled\n')
+
+    // Move into an existing folder.
+    const moved = await api('POST', '/api/note/move', { from: 'Untitled.md', to: 'sub/Untitled.md' })
+    expect(moved.status).toBe(200)
+    const listed = (await api('GET', '/api/notes')).body.notes.map((n) => n.path)
+    expect(listed).toContain('sub/Untitled.md')
+    expect(listed).not.toContain('Untitled.md')
+
+    // Moving onto an occupied path is refused rather than overwriting.
+    await api('POST', '/api/note/move', { from: 'Untitled 2.md', to: 'sub/keep.md' })
+    const clash = await api('POST', '/api/note/move', { from: 'sub/Untitled.md', to: 'sub/keep.md' })
+    expect(clash.status).toBe(409)
+    expect((await api('GET', '/api/note?path=sub/keep.md')).status).toBe(200)
+  })
+
   it('rejects path traversal', async () => {
     const { status } = await api('GET', '/api/note?path=..%2F..%2Fetc%2Fpasswd')
     expect(status).toBe(500)
